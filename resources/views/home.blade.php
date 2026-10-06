@@ -23,9 +23,9 @@
     <h2>Tabel Access</h2>
     <div class="grid">
         @foreach($tables as $t)
-            <a class="card" href="{{ route('table', $t) }}" style="display:flex;justify-content:space-between;align-items:center;">
-                <b>{{ $t }}</b>
-                <span style="color:#2563eb;font-size:12px;">Lihat Data &rarr;</span>
+            <a class="table-card" href="{{ route('table', $t) }}" title="{{ $t }}">
+                <span class="table-name">{{ $t }}</span>
+                <span class="table-action">Lihat Data &rarr;</span>
             </a>
         @endforeach
     </div>
