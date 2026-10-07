@@ -13,12 +13,15 @@ Thumbs.db
 
 /storage/*.key
 /storage/app/exports/*
+/storage/app/databases/*
+/storage/app/recent_databases.json
 /storage/framework/cache/data/*
 /storage/framework/sessions/*
 /storage/framework/testing/*
 /storage/framework/views/*
 /storage/logs/*
 !/storage/app/exports/.gitignore
+!/storage/app/databases/.gitignore
 !/storage/framework/cache/data/.gitignore
 !/storage/framework/sessions/.gitignore
 !/storage/framework/testing/.gitignore

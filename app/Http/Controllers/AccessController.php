@@ -15,6 +15,11 @@ class AccessController extends Controller
 
     public function index()
     {
+        $dbInfo = $this->access->getDatabaseInfo();
+        $recentDatabases = $this->access->getRecentDatabases();
+        $uploadMax = ini_get('upload_max_filesize') ?: '2M';
+        $postMax = ini_get('post_max_size') ?: '8M';
+
         try {
             $tables = $this->access->tables();
             $error = null;
@@ -22,24 +27,30 @@ class AccessController extends Controller
             $tables = [];
             $error = $e->getMessage();
         }
-        return view('home', compact('tables', 'error'));
+
+        return view('home', compact('tables', 'error', 'dbInfo', 'recentDatabases', 'uploadMax', 'postMax'));
     }
 
     public function table(string $table)
     {
+        $dbInfo = $this->access->getDatabaseInfo();
         try {
             $data = $this->access->rows($table, 0, 50);
             $error = null;
         } catch (\Throwable $e) {
             abort(400, $e->getMessage());
         }
-        return view('table', compact('table', 'data', 'error'));
+        return view('table', compact('table', 'data', 'error', 'dbInfo'));
     }
 
     public function export(Request $r)
     {
         set_time_limit(0);
         ini_set('memory_limit', '1024M');
+
+        if ($r->filled('db_path')) {
+            $this->access->setDatabasePath($r->input('db_path'));
+        }
 
         $r->validate([
             'table' => 'required|string',
@@ -90,6 +101,11 @@ class AccessController extends Controller
         set_time_limit(0);
         ini_set('memory_limit', '1024M');
 
+        $dbPath = $r->input('db_path');
+        if (!empty($dbPath)) {
+            $this->access->setDatabasePath($dbPath);
+        }
+
         $table = $r->string('table')->toString();
         $format = $r->string('format', 'csv')->toString();
         $offset = (int) $r->input('offset', 0);
@@ -99,7 +115,7 @@ class AccessController extends Controller
         $maxRowsPerSheet = (int) $r->input('max_rows_per_sheet', config('access.csv_max_rows_per_file', 1000000));
         if ($maxRowsPerSheet < 1) $maxRowsPerSheet = 1000000;
 
-        return response()->stream(function () use ($table, $format, $offset, $limit, $chunk, $maxRowsPerSheet) {
+        return response()->stream(function () use ($table, $format, $offset, $limit, $chunk, $maxRowsPerSheet, $dbPath) {
             $send = function ($data) {
                 echo "data: " . json_encode($data) . "\n\n";
                 if (ob_get_level() > 0) @ob_flush();
@@ -107,6 +123,9 @@ class AccessController extends Controller
             };
 
             try {
+                if (!empty($dbPath)) {
+                    $this->access->setDatabasePath($dbPath);
+                }
                 $this->access->validateTable($table);
 
                 if ($format === 'xlsx' && ($limit === 0 || $limit > 50000)) {
@@ -667,5 +686,96 @@ class AccessController extends Controller
         $path = Storage::path('exports/' . $file);
         abort_unless(is_file($path), 404);
         return response()->download($path);
+    }
+
+    public function selectDatabase(Request $r)
+    {
+        $r->validate([
+            'path' => 'required|string',
+        ], [
+            'path.required' => 'Path file database harus diisi.',
+        ]);
+
+        $path = $r->input('path');
+
+        try {
+            $this->access->setActivePath($path);
+            $filename = basename($path);
+            return back()->with('success', "Database berhasil dialihkan ke: '{$filename}'");
+        } catch (\Throwable $e) {
+            return back()->withErrors(['db_error' => $e->getMessage()])->withInput();
+        }
+    }
+
+    public function uploadDatabase(Request $r)
+    {
+        if (empty($_FILES) && empty($_POST) && isset($_SERVER['REQUEST_METHOD']) && strtolower($_SERVER['REQUEST_METHOD']) === 'post') {
+            $postMax = ini_get('post_max_size') ?: '8M';
+            return back()->withErrors([
+                'db_error' => "Ukuran file melebihi batas 'post_max_size' server ({$postMax}). Untuk file besar, gunakan opsi 'Path Lokal di Komputer' untuk langsung membuka file tanpa upload!"
+            ]);
+        }
+
+        $r->validate([
+            'access_file' => 'required|file',
+        ], [
+            'access_file.required' => 'Pilih file Access (.accdb / .mdb) yang ingin diupload.',
+        ]);
+
+        $file = $r->file('access_file');
+        if (!$file->isValid()) {
+            return back()->withErrors([
+                'db_error' => "Gagal mengupload file: " . $file->getErrorMessage() . ". Untuk file besar, disarankan menggunakan tab 'Path Lokal'!"
+            ]);
+        }
+
+        try {
+            $savedPath = $this->access->storeUploadedFile($file);
+            $filename = basename($savedPath);
+            return back()->with('success', "File database '{$filename}' berhasil diupload dan aktif!");
+        } catch (\Throwable $e) {
+            return back()->withErrors(['db_error' => $e->getMessage()]);
+        }
+    }
+
+    public function scanFolder(Request $r)
+    {
+        $folder = $r->input('folder', '');
+        if (!$folder) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Path folder harus diisi.'
+            ], 422);
+        }
+
+        try {
+            $files = $this->access->scanFolder($folder);
+            return response()->json([
+                'success' => true,
+                'folder' => $this->access->sanitizePath($folder),
+                'files' => $files,
+                'count' => count($files),
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage()
+            ], 400);
+        }
+    }
+
+    public function resetDatabase()
+    {
+        $this->access->resetDatabase();
+        return back()->with('success', 'Database telah dikembalikan ke default (.env)!');
+    }
+
+    public function removeRecentDatabase(Request $r)
+    {
+        $path = $r->input('path', '');
+        if ($path) {
+            $this->access->removeRecentDatabase($path);
+        }
+        return back()->with('success', 'File telah dihapus dari daftar riwayat.');
     }
 }

@@ -12,6 +12,11 @@ Aplikasi berbasis web lokal modern untuk membaca file database **Microsoft Acces
 ## 🌟 Fitur Utama
 
 - 🔍 **Direct Access Engine (No Import Needed)**: Membaca file database `.mdb` dan `.accdb` langsung melalui driver **PDO ODBC**, aman (*read-only*) tanpa mengubah atau merusak struktur database sumber.
+- 📁 **Pemilihan & Pengalihan Database Dinamis**:
+  - **Path Lokal Komputer**: Ketik atau tempel path lengkap file `.accdb` / `.mdb` di drive lokal tanpa batasan memori upload.
+  - **Folder Scanner Assistant**: Pindai folder komputer untuk mendeteksi seluruh file Access secara otomatis dan memilihnya dengan satu klik.
+  - **Riwayat Database (Recent Files)**: Menyimpan daftar database yang pernah dibuka untuk beralih instan antar database.
+  - **Upload File Web**: Unggah file database baru langsung dari antarmuka web ke penyimpanan aplikasi.
 - 📋 **Table Explorer & Preview**: Menjelajahi daftar tabel dan melihat pratinjau data (50 baris pertama) secara instan melalui antarmuka web.
 - 📦 **Pilihan Format Ekspor Beragam**:
   - **CSV (.csv / .zip)**: Mendukung hingga jutaan baris data dengan pemecahan otomatis (*auto-split*) jika data melampaui batas baris per file (misal 1.000.000 baris/file).
