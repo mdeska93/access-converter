@@ -299,10 +299,10 @@
             <div>
                 <label><b>Format File</b></label>
                 <select name="format" id="exportFormat">
-                    <option value="csv" {{ old('format') == 'csv' ? 'selected' : '' }}>CSV (.csv / .zip) - Maks 1.000.000 baris/sheet (Auto-split)</option>
+                    <option value="csv" {{ old('format') == 'csv' ? 'selected' : '' }}>CSV (.csv / .zip) - Auto-split 10 MB & maks 1 jt baris</option>
                     <option value="xlsx" {{ old('format') == 'xlsx' ? 'selected' : '' }}>Excel (.xlsx) - Maks 50.000 baris</option>
                     <option value="sql" {{ old('format') == 'sql' ? 'selected' : '' }}>SQL (.sql) - Satu File</option>
-                    <option value="zip" {{ old('format') == 'zip' ? 'selected' : '' }}>SQL ZIP (.zip) - Chunk per File</option>
+                    <option value="zip" {{ old('format') == 'zip' ? 'selected' : '' }}>SQL ZIP (.zip) - Auto-split per 10 MB</option>
                 </select>
             </div>
             <div>
@@ -317,19 +317,33 @@
         <br>
         <div class="row">
             <div>
-                <label><b>Record per file SQL / batch chunk</b></label>
-                <input name="chunk" id="exportChunk" type="number" min="1" value="{{ old('chunk', config('access.chunk_size', 10000)) }}">
+                <label><b>Maksimal Ukuran per File (MB)</b></label>
+                <input name="max_file_size_mb" id="exportMaxFileSizeMb" type="number" min="0.5" step="0.5" value="{{ old('max_file_size_mb', config('access.max_file_size_mb', 10)) }}" placeholder="10">
+                <small style="color:#64748b;font-size:11px;display:block;margin-top:4px;">
+                    Setiap file batch dipecah otomatis jika mencapai ukuran ini (misal: 10 MB).
+                </small>
             </div>
             <div>
                 <label><b>Maks baris per Sheet / File CSV</b></label>
                 <input name="max_rows_per_sheet" id="exportMaxRowsPerSheet" type="number" min="1000" step="1000" value="{{ old('max_rows_per_sheet', config('access.csv_max_rows_per_file', 1000000)) }}">
+                <small style="color:#64748b;font-size:11px;display:block;margin-top:4px;">
+                    Batas baris untuk format CSV / Excel (default 1.000.000).
+                </small>
+            </div>
+            <div>
+                <label><b>Record Buffer per Query (Chunk)</b></label>
+                <input name="chunk" id="exportChunk" type="number" min="1" value="{{ old('chunk', config('access.chunk_size', 10000)) }}">
+                <small style="color:#64748b;font-size:11px;display:block;margin-top:4px;">
+                    Ukuran pembacaan memory buffer per query.
+                </small>
             </div>
         </div>
         <br>
         <div style="font-size:12px;color:#64748b;margin-bottom:14px;line-height:1.6;background:#f8fafc;padding:12px;border-radius:8px;border:1px solid #e2e8f0;">
-            💡 <b>Tips Export Data Besar:</b><br>
-            - Untuk tabel dengan jutaan baris, pilih format <b>CSV</b>. Setiap file/sheet otomatis dibatasi <b>maksimal 1.000.000 baris</b> (sesuai limit 1 sheet Microsoft Excel). Sisanya otomatis dialirkan ke sheet berikutnya (Part 01, Part 02, dst.) dan dikemas ke dalam ZIP sehingga aman dibuka di Excel tanpa data terpotong.<br>
-            - Format <b>Excel (.xlsx)</b> dibatasi maksimal 50.000 baris per file agar komputer tidak kehabisan RAM.
+            💡 <b>Tips Export Data & Batch Splitting (10 MB):</b><br>
+            - <b>Auto-split Ukuran File (10 MB):</b> Format <b>CSV</b> dan <b>SQL ZIP</b> akan otomatis membagi hasil export ke file-file part terpisah (Part 01, Part 02, dst.) setiap kali ukuran file mencapai <b>10 MB</b> (atau nilai yang Anda tentukan). Jika terdiri dari beberapa part, file otomatis dikompres ke dalam satu arsip ZIP yang rapi dan siap didownload.<br>
+            - <b>Batas Baris Excel:</b> Khusus CSV, data juga dibatasi maksimal 1.000.000 baris per file agar tetap kompatibel dibuka langsung di Microsoft Excel.<br>
+            - <b>Excel (.xlsx):</b> Dibatasi maksimal 50.000 baris per file untuk mencegah kehabisan memori RAM.
         </div>
         <button id="btnStartExport" class="btn" style="font-size:15px;padding:10px 24px;">Mulai Export Data</button>
     </form>
@@ -562,6 +576,7 @@ if (exportForm) {
         const limit = document.getElementById('exportLimit').value || 0;
         const chunk = document.getElementById('exportChunk').value || 10000;
         const maxRowsPerSheet = document.getElementById('exportMaxRowsPerSheet')?.value || 1000000;
+        const maxFileSizeMb = document.getElementById('exportMaxFileSizeMb')?.value || 10;
         const dbPath = document.getElementById('exportDbPath')?.value || '';
 
         // UI Initialization
@@ -616,6 +631,7 @@ if (exportForm) {
             limit: limit,
             chunk: chunk,
             max_rows_per_sheet: maxRowsPerSheet,
+            max_file_size_mb: maxFileSizeMb,
             db_path: dbPath
         });
 

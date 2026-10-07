@@ -107,25 +107,29 @@ Berikut variabel penting yang dapat disesuaikan pada file `.env`:
 | `ACCESS_TABLE_ALLOWLIST` | Daftar tabel yang diizinkan (dipisahkan koma). Kosongkan untuk menampilkan semua tabel. | *(kosong)* |
 | `EXPORT_CHUNK_SIZE` | Jumlah record default per chunk saat memproses export | `1000` |
 | `EXPORT_MAX_ROWS` | Batas maksimum record yang boleh diexport (`0` = tanpa batas) | `0` |
+| `EXPORT_MAX_FILE_SIZE_MB` | Ukuran maksimum (dalam MB) per file batch export (CSV / SQL Chunk) sebelum otomatis dipecah | `10` |
 | `EXPORT_CSV_MAX_ROWS_PER_FILE` | Jumlah baris maksimum per file CSV sebelum dipecah menjadi file berikutnya | `1000000` |
 
 ---
 
 ## 📖 Cara Penggunaan
 
-1. **Memilih Tabel**:
+1. **Memilih Database**:
+   - Klik **Ganti / Pilih File Database** untuk memilih database melalui Path Lokal di komputer, riwayat database sebelumnya, atau upload file.
+2. **Memilih Tabel & Format**:
    - Di halaman utama, seluruh tabel yang terdeteksi pada file Access akan ditampilkan.
    - Klik **Lihat Data** pada kartu tabel untuk melihat 50 baris pertama data sampel beserta nama-nama kolomnya.
-2. **Melakukan Ekspor Data**:
+3. **Melakukan Ekspor Data**:
    - **Tabel**: Pilih tabel yang ingin diekspor.
    - **Format**:
-     - `CSV (.csv / .zip)`: Untuk dataset besar, otomatis dipecah jika melebihi batas.
+     - `CSV (.csv / .zip)`: Untuk dataset besar, otomatis dipecah per 10 MB (atau batas ukuran yang ditentukan) dan maksimal 1.000.000 baris/file.
      - `Excel (.xlsx)`: Format Excel standar (disarankan untuk data di bawah 50.000 baris).
      - `SQL (.sql)`: Menghasilkan single file SQL dengan sintaks `INSERT INTO`.
-     - `SQL ZIP (.zip)`: Menghasilkan potongan file SQL per chunk (contoh: 25.000 baris dengan chunk 5.000 menghasilkan 5 file SQL di dalam 1 file ZIP).
+     - `SQL ZIP (.zip)`: Menghasilkan potongan file SQL per 10 MB yang dikemas rapi dalam file ZIP.
+   - **Maksimal Ukuran per File (MB)**: Mengatur batas ukuran maksimal per file (default: `10` MB). File akan otomatis di-split menjadi Part 01, Part 02, dst.
    - **Start / Offset**: Mulai dari baris ke berapa (misal `0` untuk mulai dari baris pertama).
    - **Limit Data**: Jumlah data yang ingin diambil (`0` berarti ekspor seluruh baris).
-   - **Chunk Size**: Ukuran per batch/file (contoh: `1000`, `5000`, atau `10000`).
+   - **Record Buffer (Chunk)**: Ukuran pembacaan memori per putaran query (contoh: `10000`).
 3. **Mulai Export**:
    - Klik tombol **Mulai Export Data**.
    - Progress bar akan berjalan secara langsung menampilkan kemajuan ekspor.

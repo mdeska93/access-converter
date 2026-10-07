@@ -58,6 +58,7 @@ class AccessController extends Controller
             'offset' => 'nullable|integer|min:0',
             'limit' => 'nullable|integer|min:0',
             'chunk' => 'nullable|integer|min:1|max:50000',
+            'max_file_size_mb' => 'nullable|numeric|min:0.1',
         ]);
 
         $table = $r->string('table')->toString();
@@ -65,6 +66,8 @@ class AccessController extends Controller
         $offset = (int) $r->input('offset', 0);
         $limit = (int) $r->input('limit', 0);
         $chunk = (int) $r->input('chunk', config('access.chunk_size', 10000));
+        $maxFileSizeMb = (float) $r->input('max_file_size_mb', config('access.max_file_size_mb', 10));
+        if ($maxFileSizeMb <= 0) $maxFileSizeMb = 10;
 
         $this->access->validateTable($table);
 
@@ -82,7 +85,7 @@ class AccessController extends Controller
         if ($maxRowsPerSheet < 1) $maxRowsPerSheet = 1000000;
 
         if ($format === 'csv') {
-            return $this->csv($table, $offset, $limit, $chunk, $base, $dir, $cols, $maxRowsPerSheet);
+            return $this->csv($table, $offset, $limit, $chunk, $base, $dir, $cols, $maxRowsPerSheet, $maxFileSizeMb);
         }
 
         if ($format === 'xlsx') {
@@ -93,7 +96,7 @@ class AccessController extends Controller
             return $this->sqlSingle($table, $offset, $limit, $chunk, $base, $dir, $cols);
         }
 
-        return $this->sqlZip($table, $offset, $limit, $chunk, $base, $dir, $cols);
+        return $this->sqlZip($table, $offset, $limit, $chunk, $base, $dir, $cols, $maxFileSizeMb);
     }
 
     public function exportProgress(Request $r)
@@ -114,8 +117,10 @@ class AccessController extends Controller
         if ($chunk < 1) $chunk = 10000;
         $maxRowsPerSheet = (int) $r->input('max_rows_per_sheet', config('access.csv_max_rows_per_file', 1000000));
         if ($maxRowsPerSheet < 1) $maxRowsPerSheet = 1000000;
+        $maxFileSizeMb = (float) $r->input('max_file_size_mb', config('access.max_file_size_mb', 10));
+        if ($maxFileSizeMb <= 0) $maxFileSizeMb = 10;
 
-        return response()->stream(function () use ($table, $format, $offset, $limit, $chunk, $maxRowsPerSheet, $dbPath) {
+        return response()->stream(function () use ($table, $format, $offset, $limit, $chunk, $maxRowsPerSheet, $maxFileSizeMb, $dbPath) {
             $send = function ($data) {
                 echo "data: " . json_encode($data) . "\n\n";
                 if (ob_get_level() > 0) @ob_flush();
@@ -153,17 +158,17 @@ class AccessController extends Controller
                     'table' => $table,
                     'total' => $totalRows,
                     'chunk' => $chunk,
-                    'message' => "Mulai membaca data tabel '{$table}' (Target: " . number_format($totalRows, 0, ',', '.') . " baris, Chunk: " . number_format($chunk, 0, ',', '.') . ")...",
+                    'message' => "Mulai membaca data tabel '{$table}' (Target: " . number_format($totalRows, 0, ',', '.') . " baris, Batas Part: {$maxFileSizeMb} MB)...",
                 ]);
 
                 if ($format === 'csv') {
-                    $this->streamCsv($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $maxRowsPerSheet, $send);
+                    $this->streamCsv($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $maxRowsPerSheet, $maxFileSizeMb, $send);
                 } elseif ($format === 'xlsx') {
                     $this->streamXlsx($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $send);
                 } elseif ($format === 'sql') {
                     $this->streamSqlSingle($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $send);
                 } else {
-                    $this->streamSqlZip($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $send);
+                    $this->streamSqlZip($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $maxFileSizeMb, $send);
                 }
             } catch (\Throwable $e) {
                 $send([
@@ -179,9 +184,10 @@ class AccessController extends Controller
         ]);
     }
 
-    private function streamCsv($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $maxRowsPerSheet, callable $send)
+    private function streamCsv($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $maxRowsPerSheet, $maxFileSizeMb, callable $send)
     {
         $cleanTable = preg_replace('/[^A-Za-z0-9_-]/', '_', $table);
+        $maxBytesPerFile = (int) ($maxFileSizeMb * 1024 * 1024);
         $csvFiles = [];
         $partIndex = 1;
         $currentFileRows = 0;
@@ -201,20 +207,27 @@ class AccessController extends Controller
             $partIndex++;
         };
 
-        // Buka file part/sheet pertama
+        // Buka file part pertama
         $openNextFile();
 
         $batchNo = 0;
         $processed = 0;
 
-        $this->access->iterate($table, $offset, $limit, $chunk, function ($rows) use (&$fh, $cols, &$batchNo, &$processed, $totalRows, $send, &$currentFileRows, $maxRowsPerSheet, $openNextFile, &$partIndex, &$csvFiles) {
+        $this->access->iterate($table, $offset, $limit, $chunk, function ($rows) use (&$fh, $cols, &$batchNo, &$processed, $totalRows, $send, &$currentFileRows, $maxRowsPerSheet, $maxBytesPerFile, $maxFileSizeMb, $openNextFile, &$partIndex, &$csvFiles) {
             if (connection_aborted()) return;
 
             $batchNo++;
             $count = count($rows);
             foreach ($rows as $row) {
-                if ($currentFileRows >= $maxRowsPerSheet) {
+                $curSize = ftell($fh);
+                $reachedSize = ($maxBytesPerFile > 0 && $curSize >= $maxBytesPerFile);
+                $reachedRows = ($maxRowsPerSheet > 0 && $currentFileRows >= $maxRowsPerSheet);
+
+                if ($currentFileRows > 0 && ($reachedSize || $reachedRows)) {
                     $prevPart = $partIndex - 1;
+                    $reason = $reachedSize
+                        ? (round($curSize / 1024 / 1024, 2) . " MB (Batas {$maxFileSizeMb} MB)")
+                        : (number_format($maxRowsPerSheet, 0, ',', '.') . " baris");
                     $openNextFile();
                     $curPart = $partIndex - 1;
                     $send([
@@ -224,7 +237,7 @@ class AccessController extends Controller
                         'processed' => $processed,
                         'total' => $totalRows,
                         'percent' => $totalRows > 0 ? min(99, round(($processed / $totalRows) * 100, 1)) : 100,
-                        'message' => "Part #{$prevPart} (Sheet #{$prevPart}) mencapai " . number_format($maxRowsPerSheet, 0, ',', '.') . " baris. Membuka Part #{$curPart} (Sheet #{$curPart})...",
+                        'message' => "Part #{$prevPart} mencapai {$reason}. Melanjutkan ke Part #{$curPart}...",
                     ]);
                 }
 
@@ -239,7 +252,7 @@ class AccessController extends Controller
             $percent = $totalRows > 0 ? min(100, round(($processed / $totalRows) * 100, 1)) : 100;
 
             $currentPartNo = $partIndex - 1;
-            $partInfo = count($csvFiles) > 1 ? " [Sheet/Part #{$currentPartNo}]" : "";
+            $partInfo = count($csvFiles) > 1 ? " [Part #{$currentPartNo}]" : "";
 
             $send([
                 'event' => 'progress',
@@ -256,7 +269,7 @@ class AccessController extends Controller
             fclose($fh);
         }
 
-        // Jika hanya 1 file (total baris <= maxRowsPerSheet)
+        // Jika hanya 1 file (total baris <= maxRowsPerSheet && size <= maxBytesPerFile)
         if (count($csvFiles) <= 1) {
             $singleName = $cleanTable . '.csv';
             $singlePath = $base . '/' . $singleName;
@@ -277,7 +290,7 @@ class AccessController extends Controller
                 'message' => "Export CSV selesai! Total " . number_format($processed, 0, ',', '.') . " baris berhasil diexport (" . $fileSize . ").",
             ]);
         } else {
-            // Lebih dari 1 part/sheet: kompres ke ZIP
+            // Lebih dari 1 part: kompres ke ZIP
             $totalParts = count($csvFiles);
             $send([
                 'event' => 'progress',
@@ -286,7 +299,7 @@ class AccessController extends Controller
                 'processed' => $processed,
                 'total' => $totalRows,
                 'percent' => 99,
-                'message' => "Mengompres {$totalParts} file CSV (masing-masing maks " . number_format($maxRowsPerSheet, 0, ',', '.') . " baris) ke dalam arsip ZIP...",
+                'message' => "Mengompres {$totalParts} file CSV (masing-masing maks {$maxFileSizeMb} MB) ke dalam arsip ZIP...",
             ]);
 
             $zipName = $cleanTable . '_csv.zip';
@@ -315,7 +328,7 @@ class AccessController extends Controller
                 'file_name' => $zipName,
                 'file_size' => $fileSize,
                 'download_url' => $downloadUrl,
-                'message' => "Export CSV selesai! Total " . number_format($processed, 0, ',', '.') . " baris dibagi menjadi {$totalParts} file sheet/part (maks " . number_format($maxRowsPerSheet, 0, ',', '.') . " baris/file) dalam ZIP (" . $fileSize . ").",
+                'message' => "Export CSV selesai! Total " . number_format($processed, 0, ',', '.') . " baris dibagi menjadi {$totalParts} file part (maks {$maxFileSizeMb} MB per file) dalam ZIP (" . $fileSize . ").",
             ]);
         }
     }
@@ -367,14 +380,14 @@ class AccessController extends Controller
             'processed' => $processed,
             'total' => $totalRows,
             'percent' => 98,
-            'message' => "Menyimpan dan mengompres file Excel (.xlsx)...",
+            'message' => "Menulis file Excel (.xlsx) ke storage...",
         ]);
 
         $fileName = preg_replace('/[^A-Za-z0-9_-]/', '_', $table) . '.xlsx';
         $path = $base . '/' . $fileName;
         (new Xlsx($ss))->save($path);
 
-        $fileSize = is_file($path) ? round(filesize($path) / 1024, 2) . ' KB' : '0 KB';
+        $fileSize = is_file($path) ? round(filesize($path) / 1024 / 1024, 2) . ' MB' : '0 MB';
         $downloadUrl = route('download', ['file' => basename($dir) . '/' . $fileName]);
 
         $send([
@@ -440,29 +453,65 @@ class AccessController extends Controller
         ]);
     }
 
-    private function streamSqlZip($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, callable $send)
+    private function streamSqlZip($table, $offset, $limit, $chunk, $base, $dir, $cols, $totalRows, $maxFileSizeMb, callable $send)
     {
+        $cleanTable = preg_replace('/[^A-Za-z0-9_-]/', '_', $table);
+        $maxBytesPerFile = (int) ($maxFileSizeMb * 1024 * 1024);
         $sqlFiles = [];
+        $partIndex = 1;
+        $currentFileRows = 0;
+        $fh = null;
+
+        $openNextFile = function () use (&$fh, &$sqlFiles, &$partIndex, &$currentFileRows, $base, $cleanTable) {
+            if ($fh) {
+                fclose($fh);
+            }
+            $partName = sprintf('%s_part%02d.sql', $cleanTable, $partIndex);
+            $partPath = $base . '/' . $partName;
+            $fh = fopen($partPath, 'wb');
+            fwrite($fh, "-- Exported by Access Data Exporter (Part {$partIndex})\n");
+            fwrite($fh, "-- Table: {$cleanTable}\n\n");
+            $sqlFiles[] = $partPath;
+            $currentFileRows = 0;
+            $partIndex++;
+        };
+
+        $openNextFile();
+
         $batchNo = 0;
         $processed = 0;
 
-        $this->access->iterate($table, $offset, $limit, $chunk, function ($rows) use (&$batchNo, &$processed, &$sqlFiles, $base, $table, $cols, $totalRows, $send) {
+        $this->access->iterate($table, $offset, $limit, $chunk, function ($rows) use (&$fh, $cleanTable, $cols, &$batchNo, &$processed, $totalRows, $send, &$currentFileRows, $maxBytesPerFile, $maxFileSizeMb, $openNextFile, &$partIndex, &$sqlFiles) {
             if (connection_aborted()) return;
 
             $batchNo++;
             $count = count($rows);
-            $partName = sprintf('%s_%04d.sql', preg_replace('/[^A-Za-z0-9_-]/', '_', $table), $batchNo);
-            $partPath = $base . '/' . $partName;
-            $fh = fopen($partPath, 'wb');
-            fwrite($fh, "-- Exported by Access Data Exporter (Part $batchNo)\n\n");
             foreach ($rows as $row) {
+                $curSize = ftell($fh);
+                if ($currentFileRows > 0 && $maxBytesPerFile > 0 && $curSize >= $maxBytesPerFile) {
+                    $prevPart = $partIndex - 1;
+                    $openNextFile();
+                    $curPart = $partIndex - 1;
+                    $send([
+                        'event' => 'progress',
+                        'batch' => $batchNo,
+                        'batch_rows' => 0,
+                        'processed' => $processed,
+                        'total' => $totalRows,
+                        'percent' => $totalRows > 0 ? min(90, round(($processed / $totalRows) * 90, 1)) : 90,
+                        'message' => "Part SQL #{$prevPart} mencapai batas " . round($curSize / 1024 / 1024, 2) . " MB. Melanjutkan ke Part SQL #{$curPart}...",
+                    ]);
+                }
+
                 $vals = array_map(fn($v) => $this->sqlValue($v), array_values($row));
-                fwrite($fh, 'INSERT INTO `' . str_replace('`', '``', $table) . '` (`' . implode('`, `', array_map(fn($c) => str_replace('`', '``', $c), $cols)) . "`) VALUES (" . implode(', ', $vals) . ");\n");
+                fwrite($fh, 'INSERT INTO `' . str_replace('`', '``', $cleanTable) . '` (`' . implode('`, `', array_map(fn($c) => str_replace('`', '``', $c), $cols)) . "`) VALUES (" . implode(', ', $vals) . ");\n");
+                $currentFileRows++;
             }
-            fclose($fh);
-            $sqlFiles[] = $partPath;
             $processed += $count;
             $percent = $totalRows > 0 ? min(90, round(($processed / $totalRows) * 90, 1)) : 90;
+
+            $currentPartNo = $partIndex - 1;
+            $partInfo = count($sqlFiles) > 1 ? " [Part SQL #{$currentPartNo}]" : "";
 
             $send([
                 'event' => 'progress',
@@ -471,10 +520,15 @@ class AccessController extends Controller
                 'processed' => $processed,
                 'total' => $totalRows,
                 'percent' => $percent,
-                'message' => "Chunk #{$batchNo} dibuat (" . number_format($count, 0, ',', '.') . " baris)... Total: " . number_format($processed, 0, ',', '.'),
+                'message' => "Batch #{$batchNo}{$partInfo}: " . number_format($processed, 0, ',', '.') . " baris SQL ditulis (" . $percent . "%)",
             ]);
         });
 
+        if ($fh) {
+            fclose($fh);
+        }
+
+        $totalParts = count($sqlFiles);
         $send([
             'event' => 'progress',
             'batch' => $batchNo,
@@ -482,15 +536,17 @@ class AccessController extends Controller
             'processed' => $processed,
             'total' => $totalRows,
             'percent' => 95,
-            'message' => "Mengompres {$batchNo} file SQL ke dalam arsip ZIP...",
+            'message' => "Mengompres {$totalParts} file SQL (masing-masing maks {$maxFileSizeMb} MB) ke dalam arsip ZIP...",
         ]);
 
-        $zipName = preg_replace('/[^A-Za-z0-9_-]/', '_', $table) . '.zip';
+        $zipName = $cleanTable . '_sql.zip';
         $zipPath = $base . '/' . $zipName;
         $zip = new ZipArchive();
         $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
         foreach ($sqlFiles as $p) {
-            $zip->addFile($p, basename($p));
+            if (file_exists($p)) {
+                $zip->addFile($p, basename($p));
+            }
         }
         $zip->close();
 
@@ -509,13 +565,14 @@ class AccessController extends Controller
             'file_name' => $zipName,
             'file_size' => $fileSize,
             'download_url' => $downloadUrl,
-            'message' => "Export SQL ZIP selesai! {$batchNo} batch berhasil dikompres (" . $fileSize . ").",
+            'message' => "Export SQL ZIP selesai! Data dibagi menjadi {$totalParts} file SQL (maks {$maxFileSizeMb} MB/file) dalam ZIP (" . $fileSize . ").",
         ]);
     }
 
-    private function csv($table, $offset, $limit, $chunk, $base, $dir, $cols, $maxRowsPerSheet)
+    private function csv($table, $offset, $limit, $chunk, $base, $dir, $cols, $maxRowsPerSheet, $maxFileSizeMb = 10)
     {
         $cleanTable = preg_replace('/[^A-Za-z0-9_-]/', '_', $table);
+        $maxBytesPerFile = (int) ($maxFileSizeMb * 1024 * 1024);
         $csvFiles = [];
         $partIndex = 1;
         $currentFileRows = 0;
@@ -537,9 +594,13 @@ class AccessController extends Controller
 
         $openNextFile();
 
-        $this->access->iterate($table, $offset, $limit, $chunk, function ($rows) use (&$fh, $cols, &$currentFileRows, $maxRowsPerSheet, $openNextFile) {
+        $this->access->iterate($table, $offset, $limit, $chunk, function ($rows) use (&$fh, $cols, &$currentFileRows, $maxRowsPerSheet, $maxBytesPerFile, $openNextFile) {
             foreach ($rows as $row) {
-                if ($currentFileRows >= $maxRowsPerSheet) {
+                $curSize = ftell($fh);
+                $reachedSize = ($maxBytesPerFile > 0 && $curSize >= $maxBytesPerFile);
+                $reachedRows = ($maxRowsPerSheet > 0 && $currentFileRows >= $maxRowsPerSheet);
+
+                if ($currentFileRows > 0 && ($reachedSize || $reachedRows)) {
                     $openNextFile();
                 }
                 $r = [];
@@ -635,26 +696,48 @@ class AccessController extends Controller
         return response()->download($path)->deleteFileAfterSend(true);
     }
 
-    private function sqlZip($table, $offset, $limit, $chunk, $base, $dir, $cols)
+    private function sqlZip($table, $offset, $limit, $chunk, $base, $dir, $cols, $maxFileSizeMb = 10)
     {
+        $cleanTable = preg_replace('/[^A-Za-z0-9_-]/', '_', $table);
+        $maxBytesPerFile = (int) ($maxFileSizeMb * 1024 * 1024);
         $sqlFiles = [];
-        $idx = 0;
+        $partIndex = 1;
+        $currentFileRows = 0;
+        $fh = null;
 
-        $this->access->iterate($table, $offset, $limit, $chunk, function ($rows) use (&$idx, &$sqlFiles, $base, $table, $cols) {
-            $idx++;
-            $name = sprintf('%s_%04d.sql', preg_replace('/[^A-Za-z0-9_-]/', '_', $table), $idx);
-            $path = $base . '/' . $name;
-            $fh = fopen($path, 'wb');
-            fwrite($fh, "-- Exported by Access Data Exporter (Part $idx)\n\n");
-            foreach ($rows as $row) {
-                $vals = array_map(fn($v) => $this->sqlValue($v), array_values($row));
-                fwrite($fh, 'INSERT INTO `' . str_replace('`', '``', $table) . '` (`' . implode('`, `', array_map(fn($c) => str_replace('`', '``', $c), $cols)) . "`) VALUES (" . implode(', ', $vals) . ");\n");
+        $openNextFile = function () use (&$fh, &$sqlFiles, &$partIndex, &$currentFileRows, $base, $cleanTable) {
+            if ($fh) {
+                fclose($fh);
             }
-            fclose($fh);
-            $sqlFiles[] = $path;
+            $partName = sprintf('%s_part%02d.sql', $cleanTable, $partIndex);
+            $partPath = $base . '/' . $partName;
+            $fh = fopen($partPath, 'wb');
+            fwrite($fh, "-- Exported by Access Data Exporter (Part {$partIndex})\n");
+            fwrite($fh, "-- Table: {$cleanTable}\n\n");
+            $sqlFiles[] = $partPath;
+            $currentFileRows = 0;
+            $partIndex++;
+        };
+
+        $openNextFile();
+
+        $this->access->iterate($table, $offset, $limit, $chunk, function ($rows) use (&$fh, $cleanTable, $cols, &$currentFileRows, $maxBytesPerFile, $openNextFile) {
+            foreach ($rows as $row) {
+                $curSize = ftell($fh);
+                if ($currentFileRows > 0 && $maxBytesPerFile > 0 && $curSize >= $maxBytesPerFile) {
+                    $openNextFile();
+                }
+                $vals = array_map(fn($v) => $this->sqlValue($v), array_values($row));
+                fwrite($fh, 'INSERT INTO `' . str_replace('`', '``', $cleanTable) . '` (`' . implode('`, `', array_map(fn($c) => str_replace('`', '``', $c), $cols)) . "`) VALUES (" . implode(', ', $vals) . ");\n");
+                $currentFileRows++;
+            }
         });
 
-        if (empty($sqlFiles)) {
+        if ($fh) {
+            fclose($fh);
+        }
+
+        if (empty($sqlFiles) || ($currentFileRows === 0 && count($sqlFiles) === 1 && filesize($sqlFiles[0]) < 100)) {
             return back()->withErrors(['export' => 'Tidak ada data untuk diexport.']);
         }
 
@@ -662,7 +745,9 @@ class AccessController extends Controller
         $zip = new ZipArchive();
         $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
         foreach ($sqlFiles as $p) {
-            $zip->addFile($p, basename($p));
+            if (file_exists($p)) {
+                $zip->addFile($p, basename($p));
+            }
         }
         $zip->close();
 
